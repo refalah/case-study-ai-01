@@ -1,0 +1,28 @@
+{
+  "name": "case-study-01",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@chroma-core/default-embed": "^0.1.8",
+    "chromadb": "^3.0.17",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "groq-sdk": "^0.33.0",
+    "multer": "^2.0.2",
+    "nodemon": "^3.1.10",
+    "openai": "^6.1.0",
+    "pdf-parse": "^2.1.6",
+    "pdf2json": "^3.2.2",
+    "uuid": "^13.0.0"
+  }
+}
