@@ -3,49 +3,85 @@ const fs = require("fs");
 const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
 const { pdf } = require("pdf-parse");
-// console.log("pdfParse type:", typeof PDFParse);
-// console.log("pdfParse keys:", Object.keys(PDFParse));
-
 const cors = require("cors");
 const Groq = require("groq-sdk");
-
 const { ChromaClient } = require("chromadb");
-
+const rateLimit = require("express-rate-limit");
+const Joi = require('joi');
 require("dotenv").config();
 
 const app = express();
 const PORT = 3000;
 
+
 app.use(cors());
 app.use(express.json());
+
+// Rate limiting
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 uploads per window
+  message: { error: "Too many uploads, please try again later" }
+});
+
+const evaluateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: "Too many evaluation requests, please try again later" }
+});
 
 // In-memory storage
 const fileStorage = {};
 const jobStorage = {};
 
-// Multer setup
-const upload = multer({ dest: "uploads/" });
+const upload = multer({
+  dest: "uploads/",
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === "application/pdf") {
+      cb(null, true);
+    } else {
+      cb(new Error("Only PDF files are allowed"));
+    }
+  }
+});
 
-// Groq client (FREE!)
+
+////Validation Schemas ////
+const evaluateSchema = Joi.object({
+  job_title: Joi.string().min(3).max(100).required(),
+  cv_id: Joi.string().uuid().required(),
+  project_report_id: Joi.string().uuid().required()
+});
+
+const resultSchema = Joi.object({
+  id: Joi.string().uuid().required()
+});
+
+
+//// LLM & Vector DB Setup ////
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Chroma client
 const chroma = new ChromaClient();
 let collection;
 
-// ✅ PDF Parser
 async function parsePDF(filePath) {
   try {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
     const dataBuffer = fs.readFileSync(filePath);
     const data = await pdf(dataBuffer);
-    return data.text; // extracted text
+    
+    return data.text;
   } catch (err) {
     console.error("Error parsing PDF:", err);
-    throw err;
+    throw new Error(`PDF parsing failed: ${err.message}`);
   }
 }
 
-// Initialize Chroma collection
 (async () => {
   try {
     collection = await chroma.getOrCreateCollection({ name: "knowledge_base" });
@@ -80,6 +116,7 @@ async function ingestKnowledgeBase() {
     console.log("✅ Knowledge base ingested into Chroma");
   } catch (error) {
     console.error("❌ Failed to ingest knowledge base:", error.message);
+    throw error;
   }
 }
 
@@ -95,11 +132,12 @@ async function getRelevantDocs(query) {
 
 app.post(
   "/upload",
+  uploadLimiter,
   upload.fields([
     { name: "cv", maxCount: 1 },
     { name: "project", maxCount: 1 },
   ]),
-  async (req, res) => {
+  async (req, res, next) => {
     try {
       if (!req.files || !req.files.cv || !req.files.project) {
         return res
@@ -130,29 +168,34 @@ app.post(
       });
     } catch (error) {
       console.error(error);
-      res.status(500).json({ error: "Upload failed" });
+      next(error);
     }
   }
 );
 
-app.post("/evaluate", async (req, res) => {
-  const { job_title, cv_id, project_report_id } = req.body;
+app.post("/evaluate", evaluateLimiter, async (req, res, next) => {
+  try {
+    const { job_title, cv_id, project_report_id } = req.body;
 
-  if (!fileStorage[cv_id] || !fileStorage[project_report_id]) {
-    return res.status(404).json({ error: "File not found" });
-  }
+    if (evaluateSchema.validate(req.body).error) {
+      return res.status(400).json({ error: "Invalid request parameters" });
+    }
 
-  const jobId = uuidv4();
-  jobStorage[jobId] = {
-    id: jobId,
-    status: "processing",
-    createdAt: new Date(),
-  };
+    if (!fileStorage[cv_id] || !fileStorage[project_report_id]) {
+      return res.status(404).json({ error: "File not found" });
+    }
 
-  res.json({ id: jobId, status: "processing" });
+    const jobId = uuidv4();
+    jobStorage[jobId] = {
+      id: jobId,
+      status: "processing",
+      createdAt: new Date(),
+    };
 
-  (async () => {
-    try {
+    res.json({ id: jobId, status: "processing" });
+
+    (async () => {
+      try {
       const cvText = await parsePDF(fileStorage[cv_id].path);
       const projectText = await parsePDF(fileStorage[project_report_id].path);
 
@@ -239,23 +282,49 @@ app.post("/evaluate", async (req, res) => {
         ...summaryResult,
       };
     } catch (err) {
-      console.error("❌ Evaluation failed:", err);
-      jobStorage[jobId].status = "failed";
-      jobStorage[jobId].error = err.message || "Evaluation failed";
-    }
-  })();
+        console.error("❌ Evaluation failed:", err);
+        jobStorage[jobId].status = "failed";
+        jobStorage[jobId].error = err.message || "Evaluation failed";
+      }
+    })();
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.get("/result/:id", (req, res) => {
-  const { id } = req.params;
-  const job = jobStorage[id];
+app.get("/result/:id", (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (resultSchema.validate(req.params).error) {
+      return res.status(400).json({ error: "Invalid job ID format" });
+    }
+    const job = jobStorage[id];
 
-  if (!job) {
-    return res.status(404).json({ error: "Job not found" });
+    if (!job) {
+      return res.status(404).json({ error: "Job not found" });
+    }
+
+    res.json(job);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Global error handler
+app.use((err, req, res, next) => { 
+  console.error("Error:", err);
+  if (err instanceof multer.MulterError) {
+    const message = err.code === "LIMIT_FILE_SIZE" 
+      ? "File too large. Maximum size is 10MB"  
+      : `Upload error: ${err.message}`;
+    return res.status(400).json({ error: message });
   }
 
-  res.json(job);
+  const statusCode = err.status || 500;
+  
+  res.status(statusCode).json({ error: err.message || "Internal server error"});
 });
+
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
