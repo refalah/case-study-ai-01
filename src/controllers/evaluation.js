@@ -99,7 +99,6 @@ const evaluateUser = (req, res, next) => {
           response_format: { type: "json_object" },
         });
 
-        console.log("CV Eval Response:", cvEval.choices[0]);
         const cvResult = JSON.parse(cvEval.choices[0].message.content);
 
         // Evaluate Project

@@ -1,3 +1,4 @@
+require("dotenv").config();
 const fs = require("fs");
 const { pdf } = require("pdf-parse");
 const { chroma } = require("../services/chromaService");
@@ -21,21 +22,52 @@ const parsePDF = async (filePath) => {
 
 const ingestKnowledgeBase = async () => {
   try {
-    const jdText = await parsePDF("./docs/job_description.pdf");
-    const briefText = await parsePDF("./docs/case_study_brief.pdf");
-    const rubricText = await parsePDF("./docs/scoring_rubric.pdf");
-
-    await collection.add({
-      ids: ["job_description", "case_study", "scoring_rubric"],
-      documents: [jdText, briefText, rubricText],
-      metadatas: [
-        { type: "job_description" },
-        { type: "case_study" },
-        { type: "scoring_rubric" },
-      ],
+    // Parse with chunking
+    const jdChunks = await parsePDF("./docs/job_description.pdf", { 
+      returnChunks: true, 
+      chunkSize: 800 
+    });
+    const briefChunks = await parsePDF("./docs/case_study_brief.pdf", { 
+      returnChunks: true, 
+      chunkSize: 800 
+    });
+    const rubricChunks = await parsePDF("./docs/scoring_rubric.pdf", { 
+      returnChunks: true, 
+      chunkSize: 800 
     });
 
-    console.log("✅ Knowledge base ingested into Chroma");
+    const ids = [];
+    const documents = [];
+    const metadatas = [];
+
+    // Add JD chunks
+    jdChunks.forEach((chunk, i) => {
+      ids.push(`job_description_${i}`);
+      documents.push(chunk);
+      metadatas.push({ type: "job_description", chunk: i });
+    });
+
+    // Add brief chunks
+    briefChunks.forEach((chunk, i) => {
+      ids.push(`case_study_${i}`);
+      documents.push(chunk);
+      metadatas.push({ type: "case_study", chunk: i });
+    });
+
+    // Add rubric chunks
+    rubricChunks.forEach((chunk, i) => {
+      ids.push(`scoring_rubric_${i}`);
+      documents.push(chunk);
+      metadatas.push({ type: "scoring_rubric", chunk: i });
+    });
+
+    await collection.add({
+      ids,
+      documents,
+      metadatas,
+    });
+
+    console.log(`✅ Knowledge base ingested: ${documents.length} chunks total`);
   } catch (error) {
     console.error("❌ Failed to ingest knowledge base:", error.message);
     throw error;
@@ -57,8 +89,9 @@ const getRelevantDocs = async (query) => {
 
 const initKnowledgeBase = async () => {
   try {
+    console.log("Initializing knowledge base...");
     collection = await chroma.getOrCreateCollection({
-      name: "knowledge_base",
+      name: process.env.COLLECTION_NAME || "knowledge_base_00",
     });
     const count = await collection.count();
     if (count === 0) {
