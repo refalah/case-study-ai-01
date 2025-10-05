@@ -74,8 +74,9 @@ const ingestKnowledgeBase = async () => {
   }
 };
 
-const getRelevantDocs = async (query) => {
+const getRelevantDocs = async (collection, query) => {
   try {
+    console.log(`🔍 Querying knowledge base for: "${query}"`)
     const results = await collection.query({
       queryTexts: [query],
       nResults: 3,
@@ -99,6 +100,7 @@ const initKnowledgeBase = async () => {
     } else {
       console.log("✅ Knowledge base already loaded");
     }
+    return collection;
   } catch (error) {
     console.error("❌ Failed to initialize Chroma:", error);
   }

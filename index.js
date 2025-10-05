@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const { initKnowledgeBase } = require("./src/helpers/aiVectorHelper");
+const timeout = require("express-timeout-handler");
 const evalController = require("./src/controllers/evaluation");
 
 require("dotenv").config();
@@ -11,14 +11,12 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 
-(async () => {
-  try {
-    await initKnowledgeBase();
-  } catch (err) {
-    console.error("Failed to initialize knowledge base:", err);
+app.use(timeout.handler({
+  timeout: 10000,
+  onTimeout: (req, res) => {
+    res.status(408).json({ error: "Request timeout" });
   }
-})();
-
+}));
 
 // Global error handler
 app.use((err, req, res, next) => {
