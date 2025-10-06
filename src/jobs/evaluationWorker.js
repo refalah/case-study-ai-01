@@ -1,16 +1,37 @@
 const { Worker } = require("bullmq");
-const { parsePDF, getRelevantDocs, initKnowledgeBase } = require("../helpers/aiVectorHelper");
+const {
+  parsePDF,
+  getRelevantDocs,
+  initKnowledgeBase,
+} = require("../helpers/aiVectorHelper");
 const { groq } = require("../services/chromaService");
-const { redisClient } = require("../services/redisService");
+const { redisClient, evaluationQueue } = require("../services/redisService");
 const { setJob } = require("../helpers/redisHelper");
 
 let collection;
 (async () => {
   try {
     collection = await initKnowledgeBase();
-    console.log('✅ Knowledge base initialized from worker');
+    console.log("✅ Knowledge base initialized from worker");
+
+    const failedJobs = await evaluationQueue.getFailed();
+    if (failedJobs.length === 0) {
+      console.log("No failed jobs found.");
+      return;
+    } else {
+      console.log(`Found ${failedJobs.length} failed jobs, retrying...`);
+      let count = 0;
+      for (const job of failedJobs) {
+        count++;
+        await job.retry(); // This resets attempts and retries the job
+
+        if (count < failedJobs.length) {
+          await new Promise((resolve) => setTimeout(resolve, 5000)); // 5-second delay
+        }
+      }
+    }
   } catch (err) {
-    console.error('❌ Failed to initialize knowledge base (worker):', err);
+    console.error("❌ Failed to initialize knowledge base (worker):", err);
     process.exit(1); // Exit if initialization fails
   }
 })();
@@ -30,10 +51,14 @@ const evaluationWorker = new Worker(
     const cvText = await parsePDF(cvFile.path);
     const projectText = await parsePDF(projectFile.path);
 
-    const cvRefs = await getRelevantDocs(collection,
-      "backend developer job requirements CV scoring"
+    const cvRefs = await getRelevantDocs(
+      collection,
+      "Fetch data related to CV evaluation for backend engineering job"
     );
-    const projectRefs = await getRelevantDocs(collection, "case study evaluation rubric");
+    const projectRefs = await getRelevantDocs(
+      collection,
+      "Fetch data related to project evaluation and its case study"
+    );
 
     // Evaluate CV
     const cvEval = await groq.chat.completions.create({
@@ -41,9 +66,10 @@ const evaluationWorker = new Worker(
       messages: [
         {
           role: "system",
-          content: `You are a technical recruiter scoring CVs. 
-            Respond only with JSON using this format:
-                {"cv_match_rate": number(0-1),"cv_feedback": "One sentence summary of the overall sentiment"}`,
+          content: `You are a technical recruiter scoring CVs. Use the Reference Documents to evaluate the candidate's CV. 
+            Respond only with JSON using this format: {
+                "cv_match_rate": number // determine the match rate on a scale of 0-1,
+                "cv_feedback": "One sentence summary of the overall sentiment"}`,
         },
         {
           role: "user",
@@ -62,11 +88,14 @@ const evaluationWorker = new Worker(
       messages: [
         {
           role: "system",
-          content: `You are a senior engineer evaluating a project. Respond with JSON: {"project_score": number(1-5),"project_feedback": "summary"}`,
+          content: `You are a senior engineer evaluating a project. Use the Reference Documents to evaluate the candidate's project.
+          Respond with JSON: {
+          "project_score": number // determine the score of the project on a scale of 1 to 5,
+          "project_feedback": "One sentence summary of the overall sentiments"}`,
         },
         {
           role: "user",
-          content: `Project:\n${projectText}\nRefs:\n${projectRefs}`,
+          content: `Candidate Project:\n${projectText}\nReference Documents:\n${projectRefs}`,
         },
       ],
       temperature: 0.0,
@@ -116,8 +145,17 @@ evaluationWorker.on("completed", (job, result) => {
   console.log(`✅ Job ${job.id} completed.`);
 });
 
-evaluationWorker.on("failed", (job, err) => {
+evaluationWorker.on("failed", async (job, err) => {
   console.error(`❌ Job ${job.id} failed:`, err.message);
+  const jobId = job?.data?.jobId;
+  // Update job status to failed in Redis
+  if (jobId) {
+    await setJob(jobId, {
+      id: jobId,
+      status: "failed",
+      createdAt: new Date().toISOString(),
+    });
+  }
 });
 
 module.exports = { evaluationWorker };
